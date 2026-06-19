@@ -1,0 +1,7 @@
+# Cache de Python (se genera automaticamente al ejecutar el bot)
+__pycache__/
+*.pyc
+
+# Credenciales y tokens: nunca versionar el PAT ni datos sensibles
+.env
+*.token
