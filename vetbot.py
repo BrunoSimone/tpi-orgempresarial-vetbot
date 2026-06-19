@@ -9,6 +9,7 @@ La persistencia se realiza sobre archivos CSV (clientes, pacientes y turnos).
 
 import csv
 import os
+from datetime import datetime
 from enum import Enum, auto
 
 CARPETA_DATOS = os.path.join(os.path.dirname(__file__), "datos")
@@ -37,9 +38,10 @@ class Estado(Enum):
     VERIFICANDO_DISPONIBILIDAD = auto()
     OFRECIENDO_ALTERNATIVAS = auto()
     TURNO_CONFIRMADO = auto()
+    CANCELADO = auto()
 
 
-ESTADOS_FINALES = {Estado.DERIVADO_URGENCIA, Estado.TURNO_CONFIRMADO}
+ESTADOS_FINALES = {Estado.DERIVADO_URGENCIA, Estado.TURNO_CONFIRMADO, Estado.CANCELADO}
 
 ESTADOS_INTERACTIVOS = {
     Estado.ESPERANDO_DNI,
@@ -113,6 +115,48 @@ def guardar_turno(dni, nombre_paciente, fecha, hora, tipo):
 
 
 # ===========================================================================
+# VALIDACIONES (manejo del "camino infeliz")
+# ===========================================================================
+def dni_valido(texto):
+    """El DNI debe ser numerico de 7 u 8 digitos."""
+    return texto.isdigit() and 7 <= len(texto) <= 8
+
+
+def parsear_fecha_hora(texto):
+    """
+    Interpreta la entrada 'dia/mes hora' usando el anio actual (ej. '25/06 15').
+    Devuelve (fecha, hora) en formato canonico (AAAA-MM-DD, HH:MM) si es valida
+    y no esta en el pasado; de lo contrario devuelve (None, mensaje_error).
+    """
+    partes = texto.strip().split()
+    if len(partes) != 2:
+        return None, "Formato: dia/mes y hora. Ejemplo: 25/06 15"
+
+    fecha_texto, hora_texto = partes
+
+    # Hora: un numero entero dentro del horario de atencion (de 9 a 17).
+    if not hora_texto.isdigit() or not (9 <= int(hora_texto) <= 17):
+        return None, "La hora debe ser un numero de 9 a 17. Ejemplo: 15"
+    hora = HORARIOS_ATENCION[int(hora_texto) - 9]
+
+    # Fecha: dia/mes. El anio siempre es el actual (no se pide al usuario).
+    dia_mes = fecha_texto.split("/")
+    if len(dia_mes) != 2 or not (dia_mes[0].isdigit() and dia_mes[1].isdigit()):
+        return None, "La fecha debe ser dia/mes. Ejemplo: 25/06"
+    dia, mes = int(dia_mes[0]), int(dia_mes[1])
+    anio_actual = datetime.now().year
+    try:
+        momento = datetime(anio_actual, mes, dia, int(hora_texto))
+    except ValueError:
+        return None, "Esa fecha no existe. Proba con otra (dia/mes)."
+
+    if momento < datetime.now():
+        return None, "Esa fecha ya paso. Elegi un dia futuro."
+
+    return (momento.strftime("%Y-%m-%d"), hora), None
+
+
+# ===========================================================================
 # PRESENTACION: lo que el bot dice en cada estado
 # ===========================================================================
 def bot(mensaje):
@@ -141,9 +185,13 @@ def mostrar_estado(estado, contexto):
             bot("Que tipo de atencion necesitas?")
             bot("  1) Urgencia (atencion inmediata)")
             bot("  2) Turno comun (elegis dia y horario)")
+            bot("(Escribi 'cancelar' en cualquier momento para salir.)")
 
         case Estado.ESPERANDO_FECHA_HORA:
-            bot("Para que dia y hora queres el turno? (AAAA-MM-DD HH:MM)")
+            ahora = datetime.now()
+            bot(f"Hoy es {ahora.strftime('%d/%m/%Y')} y son las {ahora.strftime('%H:%M')} hs.")
+            bot("Para que dia y hora queres el turno? (atendemos de 9 a 17 hs)")
+            bot("Ingresa dia/mes y hora. Ejemplo: 25/06 15")
 
         case Estado.OFRECIENDO_ALTERNATIVAS:
             bot("Horarios disponibles ese dia:")
@@ -160,6 +208,9 @@ def mostrar_estado(estado, contexto):
             bot(f"   Paciente: {contexto['paciente']} | "
                 f"Fecha: {contexto['fecha']} | Hora: {contexto['hora']}")
             bot("Te esperamos en Patitas Felices. Gracias!")
+
+        case Estado.CANCELADO:
+            bot("Operacion cancelada. Podes volver cuando quieras. Hasta pronto!")
 
 
 # ===========================================================================
@@ -178,6 +229,9 @@ def siguiente_estado(estado, entrada, contexto):
             return _verificar_disponibilidad(contexto)
 
         case Estado.ESPERANDO_DNI:
+            if not dni_valido(entrada):
+                bot("El DNI debe ser numerico de 7 u 8 digitos. Proba de nuevo:")
+                return Estado.ESPERANDO_DNI
             contexto["dni"] = entrada
             cliente = buscar_cliente(entrada)          # [G1] consulta al CSV
             if cliente:                                # [G1] = SI -> registrado
@@ -192,18 +246,30 @@ def siguiente_estado(estado, entrada, contexto):
             return _procesar_alta(entrada, contexto)
 
         case Estado.ESPERANDO_TIPO_ATENCION:
-            if entrada.strip() == "1":                 # [G2] = urgencia
+            opcion = entrada.strip()
+            if opcion == "1":                          # [G2] = urgencia
                 return Estado.DERIVADO_URGENCIA
-            return Estado.ESPERANDO_FECHA_HORA         # [G2] = turno comun
+            if opcion == "2":                          # [G2] = turno comun
+                return Estado.ESPERANDO_FECHA_HORA
+            bot("Opcion invalida. Escribi 1 (urgencia) o 2 (turno comun):")
+            return Estado.ESPERANDO_TIPO_ATENCION
 
         case Estado.ESPERANDO_FECHA_HORA:
-            fecha, hora = entrada.split()
-            contexto["fecha"], contexto["hora"] = fecha, hora
+            resultado, error = parsear_fecha_hora(entrada)
+            if error:
+                bot(error)
+                return Estado.ESPERANDO_FECHA_HORA
+            contexto["fecha"], contexto["hora"] = resultado
             return Estado.VERIFICANDO_DISPONIBILIDAD
 
         case Estado.OFRECIENDO_ALTERNATIVAS:
-            hora_elegida = contexto["alternativas"][int(entrada.strip()) - 1]
-            return _registrar_turno(contexto, contexto["fecha"], hora_elegida)
+            opcion = entrada.strip()
+            alternativas = contexto["alternativas"]
+            if opcion.isdigit() and 1 <= int(opcion) <= len(alternativas):
+                hora_elegida = alternativas[int(opcion) - 1]
+                return _registrar_turno(contexto, contexto["fecha"], hora_elegida)
+            bot(f"Opcion invalida. Elegi un numero entre 1 y {len(alternativas)}:")
+            return Estado.OFRECIENDO_ALTERNATIVAS
 
     return estado
 
@@ -214,23 +280,33 @@ def _procesar_alta(entrada, contexto):
     texto = entrada.strip()
 
     if paso == "nombre":
+        if not texto:
+            bot("El nombre no puede estar vacio. Ingresalo de nuevo:")
+            return Estado.ESPERANDO_ALTA
         contexto["nombre"] = texto
         contexto["paso_alta"] = "telefono"
         return Estado.ESPERANDO_ALTA
 
     if paso == "telefono":
+        if not texto.isdigit():
+            bot("El telefono debe ser numerico. Ingresalo de nuevo:")
+            return Estado.ESPERANDO_ALTA
         contexto["telefono"] = texto
         contexto["paso_alta"] = "paciente"
         return Estado.ESPERANDO_ALTA
 
     if paso == "paciente":
+        if not texto:
+            bot("El nombre de la mascota no puede estar vacio:")
+            return Estado.ESPERANDO_ALTA
         contexto["paciente"] = texto
         contexto["paso_alta"] = "especie"
         return Estado.ESPERANDO_ALTA
 
     # paso == "especie": ultimo dato, persistimos cliente y paciente.
+    especie = texto or "Sin especificar"
     guardar_cliente(contexto["dni"], contexto["nombre"], contexto["telefono"])
-    guardar_paciente(contexto["dni"], contexto["paciente"], texto)
+    guardar_paciente(contexto["dni"], contexto["paciente"], especie)
     bot(f"Listo {contexto['nombre']}, quedaste registrado junto a {contexto['paciente']}.")
     return Estado.MENU_PRINCIPAL
 
@@ -240,8 +316,13 @@ def _verificar_disponibilidad(contexto):
     fecha, hora = contexto["fecha"], contexto["hora"]
     if not franja_ocupada(fecha, hora):                # [G3] = hay disponibilidad
         return _registrar_turno(contexto, fecha, hora)
-    bot(f"El horario {hora} del {fecha} ya esta ocupado.")  # [G3] = sin disponibilidad
-    contexto["alternativas"] = horarios_libres(fecha)
+
+    libres = horarios_libres(fecha)                    # [G3] = sin disponibilidad
+    if not libres:
+        bot(f"No hay horarios libres para el {fecha}. Proba otro dia.")
+        return Estado.ESPERANDO_FECHA_HORA
+    bot(f"El horario {hora} del {fecha} ya esta ocupado.")
+    contexto["alternativas"] = libres
     return Estado.OFRECIENDO_ALTERNATIVAS
 
 
@@ -269,10 +350,17 @@ def main():
         mostrar_estado(estado, contexto)
         if estado in ESTADOS_INTERACTIVOS:
             entrada = input("Tu> ")
-            estado = siguiente_estado(estado, entrada, contexto)
+            if entrada.strip().lower() == "cancelar":
+                estado = Estado.CANCELADO
+            else:
+                estado = siguiente_estado(estado, entrada, contexto)
         else:
             estado = siguiente_estado(estado, None, contexto)
 
     mostrar_estado(estado, contexto)
 
-    main()
+    # Traza de diagnostico: evidencia que la FSM termino en un estado final.
+    print(f"\n[FSM] Estado final alcanzado: {estado.name}")
+
+
+main()
