@@ -1,0 +1,2 @@
+id_turno,dni,nombre_paciente,fecha,hora,tipo,estado
+1,28999888,Rocky,2026-06-20,10:00,comun,confirmado
