@@ -12,6 +12,10 @@ responde fielmente al modelo **BPMN 2.0** diseñado para el proceso.
 - Bruno Simone
 - Shaiel Peters
 
+## 📄 Informe
+
+Informe completo del TPI (PDF): https://drive.google.com/file/d/1E7hrxNr7Rtz2hKpPnnRxqblUDuIpflYR/view?usp=sharing
+
 ## 📋 Descripción del proceso
 
 El bot automatiza el proceso administrativo de **gestión de turnos**, que hoy la
